@@ -18,8 +18,11 @@
  *
  * ALL INFORMATION REGARDING PROTOCOL WAS DERIVED FROM RPLIDAR DATASHEET:
  *
- * https://www.slamtec.com/en/Lidar
- * http://bucket.download.slamtec.com/63ac3f0d8c859d3a10e51c6b3285fcce25a47357/LR001_SLAMTEC_rplidar_protocol_v1.0_en.pdf
+ * A1 and A2
+ * https://www.slamtec.ai/wp-content/uploads/2023/11/LR001_SLAMTEC_rplidar_protocol_v2.4_en.pdf
+ * 
+ * S1 and C1
+ * https://www.slamtec.ai/wp-content/uploads/2024/01/LR001_SLAMTEC_rplidar_SC-series_protocol_v2.8_en-4.pdf
  *
  * Author: Steven Josefs, IAV GmbH
  * Based on the LightWare SF40C ArduPilot device driver from Randy Mackay
@@ -144,10 +147,13 @@ void AP_Proximity_RPLidarA2::reset_rplidar()
 // set Lidar into SCAN mode
 void AP_Proximity_RPLidarA2::send_scan_mode_request()
 {
-    static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_SCAN};
-    _uart->write(tx_buffer, 2);
-    Debug(1, "Sent scan mode request");
-}
+    // Command: 
+    const uint8_t tx_buffer[] = {RPLIDAR_PREAMBLE, RPLIDAR_CMD_EXPRESS_SCAN, 0x05, uint8_t(scan_mode), 0x00, 0x00, 0x00, 0x00};
+    const uint8_t checksum = calc_checksum(tx_buffer, sizeof(tx_buffer));
+
+    _uart->write(tx_buffer, sizeof(tx_buffer));
+    _uart->write(&checksum, 1);
+    Debug(1, "Sent scan mode request");}
 
 // send request for sensor health
 void AP_Proximity_RPLidarA2::send_request_for_health()                                    //not called yet
@@ -354,60 +360,63 @@ void AP_Proximity_RPLidarA2::parse_response_device_info()
 
 void AP_Proximity_RPLidarA2::parse_response_data()
 {
-    if (_sync_error) {
-        // out of 5-byte sync mask -> catch new revolution
-        Debug(1, "       OUT OF SYNC");
-        // on first revolution bit 1 = 1, bit 2 = 0 of the first byte
-        if ((_payload[0] & 0x03) == 0x01) {
-            _sync_error = 0;
-            Debug(1, "                  RESYNC");
-        } else {
-            return;
-        }
-    }
-    Debug(2, "UART %02x %02x%02x %02x%02x", _payload[0], _payload[2], _payload[1], _payload[4], _payload[3]); //show HEX values
-    // check if valid SCAN packet: a valid packet starts with startbits which are complementary plus a checkbit in byte+1
-    if (!((_payload.sensor_scan.startbit == !_payload.sensor_scan.not_startbit) && _payload.sensor_scan.checkbit)) {
-        Debug(1, "Invalid Payload");
-        _sync_error++;
+    // Express Scan mode holds 40 measurements per packet.
+    static const uint8_t MEASUREMENTS_PER_PACKET = 40;
+
+    // Check packet header
+    if (_payload[0] != 0xA5 || _payload[1] != 0x5A) {
+        Debug(1, "Invalid Express Scan packet header");
         return;
     }
 
+    // Get start angle (combine lower 7 bits and upper 9 bits)
+    uint16_t start_angle_q6 = ((_payload[3] << 8) | _payload[2]) >> 1;
+    float start_angle = start_angle_q6 / 64.0f;
+
+    // New scan start flag
+    bool new_scan = (_payload[3] & 0x1) != 0;
+
+    if (new_scan) {
+        // Process start of new scan if needed
+        Debug(2, "New scan started");
+    }
+
     const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
-    const float angle_deg = wrap_360(_payload.sensor_scan.angle_q6/64.0f * angle_sign + params.yaw_correction);
-    const float distance_m = (_payload.sensor_scan.distance_q2/4000.0f);
-#if RP_DEBUG_LEVEL >= 2
-    const float quality = _payload.sensor_scan.quality;
-    Debug(2, "   D%02.2f A%03.1f Q%0.2f", distance_m, angle_deg, quality);
-#endif
-    _last_distance_received_ms = AP_HAL::millis();
-    if (!ignore_reading(angle_deg, distance_m)) {
-        const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(angle_deg);
 
-        if (face != _last_face) {
-            // distance is for a new face, the previous one can be updated now
-            if (_last_distance_valid) {
-                frontend.boundary.set_face_attributes(_last_face, _last_angle_deg, _last_distance_m, state.instance);
-            } else {
-                // reset distance from last face
-                frontend.boundary.reset_face(face, state.instance);
+    // Process each measurement
+    for (uint8_t i = 0; i < MEASUREMENTS_PER_PACKET; i++) {
+        uint16_t distance = (_payload[i * 2 + 5] << 8) | _payload[i * 2 + 4];
+        float distance_m = distance / 1000.0f; // Convert mm to m
+
+        // Calculate angle (relative to start angle)
+        float angle_deg = wrap_360(start_angle + (i * 360.0f / (MEASUREMENTS_PER_PACKET * 32)) * angle_sign + params.yaw_correction);
+
+        if (!ignore_reading(angle_deg, distance_m)) {
+            _last_distance_received_ms = AP_HAL::millis();
+            const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(angle_deg);
+
+            if (face != _last_face) {
+                if (_last_distance_valid) {
+                    frontend.boundary.set_face_attributes(_last_face, _last_angle_deg, _last_distance_m, state.instance);
+                } else {
+                    frontend.boundary.reset_face(face, state.instance);
+                }
+                _last_face = face;
+                _last_distance_valid = false;
             }
 
-            // initialize the new face
-            _last_face = face;
-            _last_distance_valid = false;
-        }
-        if (distance_m > distance_min()) {
-            // update shortest distance
-            if (!_last_distance_valid || (distance_m < _last_distance_m)) {
-                _last_distance_m = distance_m;
-                _last_distance_valid = true;
-                _last_angle_deg = angle_deg;
+            if (distance_m > distance_min()) {
+                if (!_last_distance_valid || (distance_m < _last_distance_m)) {
+                    _last_distance_m = distance_m;
+                    _last_distance_valid = true;
+                    _last_angle_deg = angle_deg;
+                }
+                database_push(angle_deg, distance_m);
             }
-            // update OA database
-            database_push(_last_angle_deg, _last_distance_m);
         }
     }
+
+    Debug(2, "Processed Express Scan packet");
 }
 
 void AP_Proximity_RPLidarA2::parse_response_health()
@@ -417,6 +426,16 @@ void AP_Proximity_RPLidarA2::parse_response_health()
         Debug(1, "LIDAR Error");
     }
     Debug(1, "LIDAR Healthy");
+}
+
+// Checksum
+uint8_t AP_Proximity_RPLidarA2::calc_checksum(const uint8_t* buffer, size_t length)
+{
+    uint8_t checksum = 0;
+    for (size_t i = 0; i < length; i++) {
+        checksum ^= buffer[i];
+    }
+    return checksum;
 }
 
 #endif // AP_PROXIMITY_RPLIDARA2_ENABLED

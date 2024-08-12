@@ -116,6 +116,14 @@ const AP_Param::GroupInfo AP_Proximity_Params::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("_ADDR", 25, AP_Proximity_Params, address, 0),
 
+    // @Param: _SCAN_MODE
+    // @DisplayName: Scan mode of RPLidar
+    // @Description: The scan mode request for RPLidar. A1 and A2 supports 0:Standard, 1:Express, 2:Boost, 3:Sensitivity, 4:Stability, 5:DenseBoost. S1 and C1 supports 0:Standard, 1:DenseBoost.
+    // @Range: 0 5
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("_SCAN_MODE", 26, AP_Proximity_Params, scan_mode, 0),
+
     AP_GROUPEND
 };
 

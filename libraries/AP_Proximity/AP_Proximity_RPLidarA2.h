@@ -85,10 +85,11 @@ private:
     void reset_rplidar();
     void reset();
 
+    uint8_t calc_checksum(const uint8_t* buffer, size_t length);
+
     // remove bytes from read buffer:
     void consume_bytes(uint16_t count);
 
-    uint8_t _sync_error;
     uint16_t _byte_count;
 
     // request related variables
@@ -154,6 +155,14 @@ private:
         C1,
         S1,
     } model = Model::UNKNOWN;
+
+    enum class ScanMode {
+        STANDARD = 0,
+        EXPRESS_OR_DENSE_BOOST,
+        BOOST,
+        SENSITIVITY,
+        STABILITY
+    } scan_mode = ScanMode::STANDARD;
 
     bool make_first_byte_in_payload(uint8_t desired_byte);
 };
