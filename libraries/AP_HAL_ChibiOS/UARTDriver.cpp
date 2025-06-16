@@ -495,6 +495,12 @@ void UARTDriver::_begin(uint32_t b, uint16_t rxS, uint16_t txS)
     // setup flow control
     set_flow_control(_flow_control);
 
+    // for rj703 custom
+    if (serial_num == 2 && !sdef.is_usb) {
+        configure_parity(2);  // Even parity
+        set_stop_bits(2);     // 2 stop bits
+    }
+
     if (serial_num == 0 && _tx_initialised) {
 #ifndef HAL_STDOUT_SERIAL
         // setup hal.console to take printf() output
